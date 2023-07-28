@@ -17,58 +17,56 @@ struct ROBOTICVEHICLE_API FVehicleMotorConfig
         InitDefaults();
     }
 
-    /** Armature Resistance (Ohms) */
-    UPROPERTY(EditAnywhere, Category = Setup)
-    float ArmatureResistance;
+    /** Torque [Noramlized 0..1] for a given RPM */
+    UPROPERTY(EditANywhere, Category = Setup)
+    FRuntimeFloatCurve TorqueCurve;
 
-    /** Motor Max Voltage (Volts) */
     UPROPERTY(EditAnywhere, Category = Setup)
-    float MotorVoltage;
+    TSet<int> WheelIndicies;
 
-    /** Torque Constant (Nm/Amp)*/
+    /** Max Motor Torque (Nm) is multiplied by TorqueCurve*/
     UPROPERTY(EditAnywhere, Category = Setup)
-    float TorqueConstant;
+    float MaxTorque;
 
-    /** EMF Constant (V/RPM)*/
+    /** Max Motor RPM */
     UPROPERTY(EditAnywhere, Category = Setup)
-    float EMFConstant;
+    float MaxRpm;
 
-    /** Gear Ratio (unitless)*/
+    /** Gear Ratio From Wheel to Motor (unitless)*/
     UPROPERTY(EditAnywhere, Category = Setup)
     float OverallRatio;
 
-    /** Wheel System Rotational Moment of Inertia (kg*m^2)*/
-    UPROPERTY(EditAnywhere, Category = Setup)
-    float MotorSystemMOI;
-
-    /** Drive System Friction at Motor (Nm)*/
+    /** Motor System Friction At Motor Output Shaft*/
     UPROPERTY(EditAnywhere, Category = Setup)
     float MotorSystemFriction;
 
-    /** Proportional Gain for Speed Control */
+    /** Toggle PID Control, allows for SetTargetMotorSpeeds */
     UPROPERTY(EditAnywhere, Category = Setup)
+    bool PidControl;
+
+    /** Proportional Gain for Speed Control */
+    UPROPERTY(EditAnywhere, Category = Setup, meta = (EditCondition = "PidControl"))
     float ProportionalGain;
 
     /** Integral Gain for Speed Control */
-    UPROPERTY(EditAnywhere, Category = Setup)
+    UPROPERTY(EditAnywhere, Category = Setup, meta = (EditCondition = "PidControl"))
     float IntegralGain;
 
     /** Derivative Gain for Speed Control */
-    UPROPERTY(EditAnywhere, Category = Setup)
+    UPROPERTY(EditAnywhere, Category = Setup, meta = (EditCondition = "PidControl"))
     float DerivativeGain;
+
 
     void InitDefaults()
     {
-        ArmatureResistance = 0.091;
-		MotorVoltage = 12;
-        TorqueConstant = .0188;
-        EMFConstant = .0188;
 		OverallRatio = 1;
-		MotorSystemMOI = 1;
+        MaxRpm = 1000;
+        MaxTorque = 10;
 		MotorSystemFriction = 0;
         ProportionalGain = 0.5;
         IntegralGain = 0;
         DerivativeGain = 0;
+        PidControl = false;
     }
 
 	const FSimpleMotorConfig& GetPhysicsMotorConfig()
@@ -77,21 +75,39 @@ struct ROBOTICVEHICLE_API FVehicleMotorConfig
 		return PMotorConfig;
 	}
 
+    float GetTorqueFromRPM(float MotorRPM)
+    {
+        // The source curve does not need to be normalized, however we are normalizing it when it is passed on,
+		// since it's the MaxRpm and MaxTorque values that determine the range of RPM and Torque
+		float MinVal = 0.f, MaxVal = 0.f;
+		this->TorqueCurve.GetRichCurveConst()->GetValueRange(MinVal, MaxVal);
+		return TorqueCurve.GetRichCurve()->Eval(MotorRPM) / MaxVal * MaxTorque;
+    }
+
 
 private:
 
 	void FillMotorSetup()
 	{
-		PMotorConfig.ArmatureResistance = this->ArmatureResistance;
-		PMotorConfig.MotorVoltage = this->MotorVoltage;
-		PMotorConfig.TorqueConstant = this->TorqueConstant;
-		PMotorConfig.EMFConstant = this->EMFConstant;
+        PMotorConfig.TorqueCurve.Empty();
+		float NumSamples = 20;
+		for (float X = 0; X <= this->MaxRpm; X+= (this->MaxRpm / NumSamples))
+		{ 
+			float MinVal = 0.f, MaxVal = 0.f;
+			this->TorqueCurve.GetRichCurveConst()->GetValueRange(MinVal, MaxVal);
+			float Y = this->TorqueCurve.GetRichCurveConst()->Eval(X) / MaxVal;
+			PMotorConfig.TorqueCurve.AddNormalized(Y);
+		}
+
+        PMotorConfig.WheelIndicies = this->WheelIndicies;
 		PMotorConfig.OverallRatio = this->OverallRatio;
-		PMotorConfig.MotorSystemMOI = this->MotorSystemMOI;
+        PMotorConfig.MaxRpm = this->MaxRpm;
+        PMotorConfig.MaxTorque = this->MaxTorque;
 		PMotorConfig.MotorSystemFriction = this->MotorSystemFriction;
         PMotorConfig.ProportionalGain = this->ProportionalGain;
         PMotorConfig.IntegralGain = this->IntegralGain;
         PMotorConfig.DerivativeGain = this->DerivativeGain;
+        PMotorConfig.PidControl = this->PidControl;
 	}
 
 	FSimpleMotorConfig PMotorConfig;
@@ -110,19 +126,19 @@ public:
 	{
 	}
 
-    virtual void SetIndividualWheelControl(bool _IndividualWheelControl)
+    virtual void SetSpeedControl(bool _SpeedControl)
     {
-        IndividualWheelControl = _IndividualWheelControl;
+        SpeedControl = _SpeedControl;
     }
 
-    virtual int GetNumSpeeds()
+    virtual void SetTargetMotorSpeed(float RPM, int MotorIdx)
     {
-        return desiredSpeeds.Num();
+        desiredSpeeds[MotorIdx] = RPM;
     }
 
-    virtual void SetTargetWheelSpeed(float RPM, int WheelIdx)
+    virtual void SetMotorThrottle(float Throttle, int MotorIdx)
     {
-        desiredSpeeds[WheelIdx] = RPM;
+        desiredThrottles[MotorIdx] = Throttle;
     }
 
     virtual void SetNumMotors(int NumMotors)
@@ -130,17 +146,25 @@ public:
         for(int MotorIdx = 0; MotorIdx < NumMotors; MotorIdx++)
         {
             desiredSpeeds.Add(0);
+            desiredThrottles.Add(0);
         }
     }
 
+    virtual int GetNumMotors()
+    {
+        return desiredSpeeds.Num();
+    }
+
     TArray<float> desiredSpeeds;
-    // Flag to Enable Individual Wheel Control
-    bool IndividualWheelControl;
+    TArray<float> desiredThrottles;
 
-protected:
+    float StaticLateralFrictionCoefficient;
+    float StaticLongitudinalFrictionCoefficient;
+    float SkidLateralFrictionCoefficient;
+    float SkidLongitudinalFrictionCoefficient;
+    float StaticToSkidSlipRatio;
 
-private:
-
+    bool SpeedControl;
 };
 
 /**
@@ -156,12 +180,35 @@ public:
 	UPROPERTY(EditAnywhere, Category = MotorSetup)
 	TArray<FVehicleMotorConfig> MotorSetups;
 
-    /** Enable Individual Wheel Speed Control (Disables Throttle Control) */
-    UPROPERTY(EditAnywhere, Category = MotorSetup)
-    bool IndividualWheelControl;
+    /** Enable Speed Control (SetTargetMotorSpeed) instead of throttle control (Must Enable PID in each Motor)*/
+    UPROPERTY(EditAnywhere, Category = SkidSteerSetup)
+    bool SpeedControl;
+
+    /** Lateral Friction Coefficient in Static (non-skidding) condition*/
+    UPROPERTY(EditAnywhere, Category = SkidSteerSetup)
+    float StaticLateralFrictionCoefficient;
+
+    /** Longitudinal Friction Coefficient in Static (non-skidding) condition*/
+    UPROPERTY(EditAnywhere, Category = SkidSteerSetup)
+    float StaticLongitudinalFrictionCoefficient;
+
+    /** Lateral Friction Coefficient in skidding condition*/
+    UPROPERTY(EditAnywhere, Category = SkidSteerSetup)
+    float SkidLateralFrictionCoefficient;
+    
+    /** Longitudinal Friction Coefficient in skidding condition*/
+    UPROPERTY(EditAnywhere, Category = SkidSteerSetup)
+    float SkidLongitudinalFrictionCoefficient;
+    
+    /** Slip Ratio at which vehicle goes from static to skidding*/
+    UPROPERTY(EditAnywhere, Category = SkidSteerSetup)
+    float StaticToSkidSlipRatio;
 
     UFUNCTION(BlueprintCallable, Category = "Game|Components|ElectricVehicleMovement|")
-    void SetTargetWheelSpeed(float RPM, int WheelIdx);
+    void SetTargetMotorSpeed(float RPM, int MotorIdx);
+
+    UFUNCTION(BlueprintCallable, Category = "Game|Components|ElectricVehicleMovement|")
+    void SetMotorThrottle(float ThrottleValue, int MotorIdx);
 
     UFUNCTION(BlueprintCallable, Category = "Game|Components|ElectricVehicleMovement|")
     float GetWheelSpeed(int WheelIdx);
@@ -186,7 +233,7 @@ protected:
     virtual void FillWheelOutputSpeeds();
 
     USkidSteerSimulation* ElectricVehicleSimulationPT;
-	TArray<FSimpleMotorSim> Motors;
+	//TArray<FSimpleMotorSim> Motors;
     TArray<float> outputSpeeds;
 	
 };

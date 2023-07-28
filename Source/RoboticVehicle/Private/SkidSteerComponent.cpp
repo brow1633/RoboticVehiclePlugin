@@ -33,8 +33,14 @@
 
 using namespace Chaos;
 
-USkidSteerComponent::USkidSteerComponent(const FObjectInitializer &ObjectInitializer) :
-    Super(ObjectInitializer)
+USkidSteerComponent::USkidSteerComponent(const FObjectInitializer &ObjectInitializer)
+    : Super(ObjectInitializer)
+	, SpeedControl(false)
+	, StaticLateralFrictionCoefficient(0.5)
+	, StaticLongitudinalFrictionCoefficient(0.5)
+	, SkidLateralFrictionCoefficient(0.5)
+	, SkidLongitudinalFrictionCoefficient(0.5)
+	, StaticToSkidSlipRatio(0.1)
 {
 	for(int32 MotorIdx = 0; MotorIdx < MotorSetups.Num(); ++MotorIdx)
 	{
@@ -48,19 +54,31 @@ void USkidSteerComponent::SetupVehicle(TUniquePtr<Chaos::FSimpleWheeledVehicle> 
 
 	Super::SetupVehicle(PVehicle);
     check(VehicleSimulationPT);
-    ElectricVehicleSimulationPT->SetIndividualWheelControl(IndividualWheelControl);
+    ElectricVehicleSimulationPT->SetSpeedControl(SpeedControl);
 
 	FSimpleElectricWheeledVehicle* PElectricVehicle (static_cast<FSimpleElectricWheeledVehicle*>(PVehicle.Get()));
+
+	ElectricVehicleSimulationPT->StaticLateralFrictionCoefficient = StaticLateralFrictionCoefficient;
+	ElectricVehicleSimulationPT->StaticLongitudinalFrictionCoefficient = StaticLongitudinalFrictionCoefficient;
+	ElectricVehicleSimulationPT->SkidLateralFrictionCoefficient = SkidLateralFrictionCoefficient;
+	ElectricVehicleSimulationPT->SkidLongitudinalFrictionCoefficient = SkidLongitudinalFrictionCoefficient;
+	ElectricVehicleSimulationPT->StaticToSkidSlipRatio = StaticToSkidSlipRatio;
 
 	check(PElectricVehicle);
 
 	for(int32 MotorIdx = 0; MotorIdx < MotorSetups.Num(); ++MotorIdx)
 	{
-		outputSpeeds.Add(0.f);
+		ensure(!MotorSetups[MotorIdx].WheelIndicies.IsEmpty());
 		FSimpleMotorSim MotorSim(&MotorSetups[MotorIdx].GetPhysicsMotorConfig());
 		PElectricVehicle->Motors.Add(MotorSim);
 	}
-	ensure(outputSpeeds.Num() == MotorSetups.Num());
+
+	for(int32 WheelIdx = 0; WheelIdx < PElectricVehicle->Wheels.Num(); ++WheelIdx)
+	{
+		outputSpeeds.Add(0.f);
+	}
+
+	ensure(PElectricVehicle->Motors.Num() <= PElectricVehicle->Wheels.Num());
 
     ElectricVehicleSimulationPT->SetNumMotors(MotorSetups.Num());
 }
@@ -89,12 +107,21 @@ float USkidSteerComponent::GetWheelSpeed(int WheelIdx)
     return 0.f;
 }
 
-void USkidSteerComponent::SetTargetWheelSpeed(float RPM, int WheelIdx)
+void USkidSteerComponent::SetTargetMotorSpeed(float RPM, int MotorIdx)
 {
-    if(WheelIdx < ElectricVehicleSimulationPT->GetNumSpeeds())
+    if(MotorIdx < ElectricVehicleSimulationPT->GetNumMotors())
     {
-        ElectricVehicleSimulationPT->SetTargetWheelSpeed(RPM, WheelIdx);
+        ElectricVehicleSimulationPT->SetTargetMotorSpeed(RPM, MotorIdx);
 	    UE_LOG(LogTemp, Warning, TEXT("Setting from BluePrint %lf"), RPM)
+    }
+}
+
+void USkidSteerComponent::SetMotorThrottle(float ThrottleValue, int MotorIdx)
+{
+    if(MotorIdx < ElectricVehicleSimulationPT->GetNumMotors())
+    {
+        ElectricVehicleSimulationPT->SetMotorThrottle(ThrottleValue, MotorIdx);
+	    //UE_LOG(LogTemp, Warning, TEXT("Setting from BluePrint %lf"), RPM)
     }
 }
 
@@ -105,7 +132,7 @@ void USkidSteerSimulation::UpdateSimulation(float DeltaTime, const FChaosVehicle
 
 	if (CanSimulate() && Handle)
 	{
-		ensure(PElectricVehicle->Wheels.Num() == PElectricVehicle->Motors.Num());
+		ensure(PElectricVehicle->Wheels.Num() >= PElectricVehicle->Motors.Num());
 	}
 
 	ProcessElectroMechanicalSimulation(DeltaTime);
@@ -126,7 +153,7 @@ void USkidSteerSimulation::ApplyInput(const FControlInputs &ControlInputs, float
 		for(int MotorIdx = 0; MotorIdx < PElectricVehicle->Motors.Num(); MotorIdx++)
 		{
 			auto& PMotor = PElectricVehicle->Motors[MotorIdx];
-            if(IndividualWheelControl)
+            if(SpeedControl)
             {
                 UE_LOG(LogTemp, Warning, TEXT("Applying Input with Desired Speed: %lf"), desiredSpeeds[MotorIdx]);
                 ensure(MotorIdx < desiredSpeeds.Num());
@@ -134,7 +161,7 @@ void USkidSteerSimulation::ApplyInput(const FControlInputs &ControlInputs, float
             }
             else
             {
-                PMotor.SetThrottle(ModifiedInputs.ThrottleInput-ModifiedInputs.BrakeInput);
+                PMotor.SetThrottle(desiredThrottles[MotorIdx]);
             }
 			/*UE_LOG(LogTemp, Warning, TEXT("Input: %lf, Brake Input: %lf"), 	ModifiedInputs.ThrottleInput,
 																			ModifiedInputs.BrakeInput);*/
@@ -147,19 +174,28 @@ void USkidSteerSimulation::ProcessElectroMechanicalSimulation(float DeltaTime)
 	FSimpleElectricWheeledVehicle* PElectricVehicle (static_cast<FSimpleElectricWheeledVehicle*>(PVehicle.Get()));
 	check(PElectricVehicle);
 
-	if(PElectricVehicle->Motors.Num() == PElectricVehicle->Wheels.Num()) {
-		for(int WheelIdx = 0; WheelIdx < PElectricVehicle->Motors.Num(); ++WheelIdx)
+	for(int MotorIdx = 0; MotorIdx < PElectricVehicle->Motors.Num(); ++MotorIdx) {
+		auto& PMotor = PElectricVehicle->Motors[MotorIdx];
+		float WheelRPM = 0.0;
+
+		auto WheelIndicies = PMotor.GetWheelIndicies();
+		auto& Wheels = PElectricVehicle->Wheels;
+
+		for(auto WheelIdx : WheelIndicies)
 		{
-			auto& PMotor = PElectricVehicle->Motors[WheelIdx];
-			auto& PWheel = PElectricVehicle->Wheels[WheelIdx];
+			WheelRPM += Wheels[WheelIdx].GetWheelRPM();
+		}
 
-			float WheelRPM = PWheel.GetWheelRPM();
-			PMotor.SetMotorRPM(WheelRPM);
-			PMotor.Simulate(DeltaTime);
-			float MotorTorque = PMotor.GetWheelTorque();
+		WheelRPM /= WheelIndicies.Num();
+		PMotor.SetMotorRPM(WheelRPM);
+		// Caution: Overrides Throttle Value if PID Enabled
+		PMotor.Simulate(DeltaTime);
+		float Torque = Chaos::TorqueMToCm(PMotor.GetWheelTorque() / WheelIndicies.Num());
 
-			PWheel.SetDriveTorque(Chaos::TorqueMToCm(MotorTorque));
-			UE_LOG(LogTemp, Warning, TEXT("Drive Torque: %lf, Wheel Speed: %lf"), MotorTorque, PWheel.GetWheelRPM());
+		for(auto WheelIdx : WheelIndicies)
+		{
+			Wheels[WheelIdx].SetDriveTorque(Torque);
+			UE_LOG(LogTemp, Warning, TEXT("Output Torque[%d]: %lf"), WheelIdx, Torque)
 		}
 	}
 }
@@ -184,10 +220,36 @@ void USkidSteerSimulation::ApplyWheelFrictionForces(float DeltaTime)
 		PWheel.SetVehicleGroundSpeed(SteerLocalWheelVelocity);
 		PWheel.Simulate(DeltaTime);
 
+		float AppliedLinearDriveForce = PWheel.GetDriveTorque() / PWheel.GetEffectiveRadius();
+		float WheelLoadForce = PWheel.GetWheelLoadForce();
+		float MassPerWheel = PWheel.MassPerWheel;
+		float SkidMagnitude = PWheel.GetSkidMagnitude();
+
+		float ForceRequiredToBringToStop = -(MassPerWheel * 0.4f * SkidMagnitude) / DeltaTime;
+		float MaxLongitudinal;
+		float MaxLateral;
+
+		if(PWheel.GetSlipAngle() > StaticToSkidSlipRatio) {
+			MaxLongitudinal = SkidLongitudinalFrictionCoefficient;
+			MaxLateral = SkidLateralFrictionCoefficient;
+		} else {
+			MaxLongitudinal = StaticLongitudinalFrictionCoefficient;
+			MaxLateral = StaticLateralFrictionCoefficient;
+		}
+
+		FVector FrictionForceLocal (AppliedLinearDriveForce, ForceRequiredToBringToStop, 0);
+
+		float Normalizer = FMath::Sqrt((FrictionForceLocal.X * FrictionForceLocal.X) / (MaxLongitudinal * MaxLongitudinal) 
+							+ (FrictionForceLocal.Y * FrictionForceLocal.Y) / (MaxLateral * MaxLateral));
+
+		if(Normalizer > 1.0f) {
+			FrictionForceLocal /= Normalizer;
+		}
+
 		if (PWheel.InContact())
 		{
 			float RotationAngle = FMath::RadiansToDegrees(PWheel.GetAngularPosition());
-			FVector FrictionForceLocal = PWheel.GetForceFromFriction();
+			//FVector FrictionForceLocal = PWheel.GetForceFromFriction();
 			FrictionForceLocal = SteeringRotator.RotateVector(FrictionForceLocal);
 
 			FVector GroundZVector = HitResult.Normal;

@@ -11,30 +11,28 @@ PRAGMA_DISABLE_OPTIMIZATION
 struct ROBOTICVEHICLE_API FSimpleMotorConfig
 {
     FSimpleMotorConfig()
-        : ArmatureResistance(0.091)
-        , MotorVoltage(12)
-        , TorqueConstant(.0188)
-        , EMFConstant(.0188)
-		, OverallRatio(1)
-		, MotorSystemMOI(1)
+		: OverallRatio(1)
+        , MaxTorque(10)
+        , MaxRpm(1000)
         , MotorSystemFriction(0)
         , ProportionalGain(0.5)
         , IntegralGain(0.f)
         , DerivativeGain(0.f)
+        , PidControl(false)
         {
 
         }
 
-        float ArmatureResistance;
-        float MotorVoltage;
-        float TorqueConstant;
-        float EMFConstant;
+        Chaos::FNormalisedGraph TorqueCurve;
+        TSet<int> WheelIndicies;
 		float OverallRatio;
-		float MotorSystemMOI;
+        float MaxTorque;
+        float MaxRpm;
 		float MotorSystemFriction;
         float ProportionalGain;
         float IntegralGain;
         float DerivativeGain;
+        bool PidControl;
 };
 
 class ROBOTICVEHICLE_API FSimpleMotorSim : public TVehicleSystem<FSimpleMotorConfig>
@@ -65,27 +63,16 @@ public:
     {
         if(!FreeRunning)
         {
-            GroundSpeed = InWheelRPM * Setup().OverallRatio;
+            CurrentRPM = InWheelRPM * Setup().OverallRatio;
         }
-    }
-
-    float GetMotorTorque()
-    {
-        return GetTorqueFromVoltage(Throttle*Setup().MotorVoltage);
     }
 
     float GetWheelTorque()
     {
-        return GetMotorTorque() * Setup().OverallRatio;
+        return Throttle * GetTorqueFromRPM(CurrentRPM);
     }
 
-    float GetTorqueFromVoltage(float MotorVoltageIn)
-    {
-        return GetTorqueFromVoltage(MotorVoltageIn, CurrentRPM);
-    }
-
-    /* Get torque value based on input RPM and Voltage */
-    float GetTorqueFromVoltage(float MotorVoltageIn, float RPM);
+    float GetTorqueFromRPM(float RPM);
 
     /* Get motor speed in Revolutions per Minute */
     float GetMotorRPM() const
@@ -93,12 +80,16 @@ public:
         return CurrentRPM;
     }
 
+    TSet<int> GetWheelIndicies()
+    {
+        return Setup().WheelIndicies;
+    }
+
     void Simulate(float DeltaTime);
 
 protected:
     float Throttle; // [-1,1] normalized throttle
-    float GroundSpeed;  // Wheel's Ground Speed
-    float CurrentRPM;   // current RPM
+    float CurrentRPM;  // Wheel's Ground Speed
     float TargetSpeed; // target wheel speed [RPM]
     float DriveTorque;  // current torque [N.m]
 

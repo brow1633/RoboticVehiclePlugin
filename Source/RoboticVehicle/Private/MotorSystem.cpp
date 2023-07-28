@@ -2,7 +2,6 @@
 
 FSimpleMotorSim::FSimpleMotorSim(const FSimpleMotorConfig *StaticDataIn) :
     TVehicleSystem<FSimpleMotorConfig>(StaticDataIn),
-    GroundSpeed(0.f),
     CurrentRPM(0.f),
     TargetSpeed(0.f),
     DriveTorque(0.f),
@@ -13,48 +12,56 @@ FSimpleMotorSim::FSimpleMotorSim(const FSimpleMotorConfig *StaticDataIn) :
 {
 }
 
-float FSimpleMotorSim::GetTorqueFromVoltage(float MotorVoltageIn, float RPM)
+float FSimpleMotorSim::GetTorqueFromRPM(float RPM)
 {
+    if(FMath::Abs(RPM) > 10 * Setup().MaxRpm) {
+        UE_LOG(LogTemp, Warning, TEXT("Max RPM greatly exceeded"));
+        return 0.0;
+    }
+
     if(FreeRunning)
     {
         return -Setup().MotorSystemFriction * FMath::Sign(RPM);
     }
 
-    float backEMF = (Setup().EMFConstant * Chaos::RPMToOmega(RPM));
 
-    UE_LOG(LogTemp, Warning, TEXT("MotorVoltageIn: %lf, BackEMF: %lf"), MotorVoltageIn, backEMF);
-    return (MotorVoltageIn - backEMF) / (Setup().ArmatureResistance) * Setup().TorqueConstant - Setup().MotorSystemFriction*FMath::Sign(RPM);
+    UE_LOG(LogTemp, Warning, TEXT("GetTorqueFromRPM: %lf"), RPM);
+    float Torque = Setup().TorqueCurve.GetValue(FMath::Abs(RPM), Setup().MaxRpm, Setup().MaxTorque);
+
+    //UE_LOG(LogTemp, Warning, TEXT("MotorVoltageIn: %lf, BackEMF: %lf"), MotorVoltageIn, backEMF);
+    return Setup().OverallRatio * Torque;
 }
 
 void FSimpleMotorSim::Simulate(float DeltaTime)
 {
-
-    //Omega += (TargetSpeed - Omega) * 4.0f * DeltaTime; // Fudge factor?
-    Omega = Chaos::RPMToOmega(GroundSpeed);
-    CurrentRPM = GroundSpeed;
-
-    float error = TargetSpeed - CurrentRPM;
-
-    // Reset Integral
-    if(signbit(IntegralAcc) == signbit(error))
+    if(Setup().PidControl)
     {
-        IntegralAcc += error * DeltaTime;
+        //Omega += (TargetSpeed - Omega) * 4.0f * DeltaTime; // Fudge factor?
+        Omega = Chaos::RPMToOmega(CurrentRPM);
+
+        float error = TargetSpeed - CurrentRPM;
+
+        // Reset Integral
+        if(signbit(IntegralAcc) == signbit(error))
+        {
+            IntegralAcc += error * DeltaTime;
+        }
+        else
+        {
+            IntegralAcc = 0;
+        }
+
+        float derivative = (error - PrevError) / DeltaTime;
+
+        float throttle_signal = 
+                Setup().ProportionalGain * error +
+                Setup().IntegralGain * IntegralAcc +
+                Setup().DerivativeGain * derivative;
+
+        SetThrottle(throttle_signal);
+        UE_LOG(LogTemp, Warning, TEXT("Target Speed: %lf, Error: %lf, Setting Throttle: %lf"), TargetSpeed, error, throttle_signal);
+
+        PrevError = error;
     }
-    else
-    {
-        IntegralAcc = 0;
-    }
-
-    float derivative = (error - PrevError) / DeltaTime;
-
-    float throttle_signal = 
-            Setup().ProportionalGain * error +
-            Setup().IntegralGain * IntegralAcc +
-            Setup().DerivativeGain * derivative;
-
-    SetThrottle(throttle_signal);
-    UE_LOG(LogTemp, Warning, TEXT("Target Speed: %lf, Setting Throttle: %lf"), TargetSpeed, throttle_signal);
-
-    PrevError = error;
 
 }
